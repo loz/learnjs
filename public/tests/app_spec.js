@@ -1,10 +1,22 @@
+/***
+ * Excerpted from "Serverless Single Page Apps",
+ * published by The Pragmatic Bookshelf.
+ * Copyrights apply to this code. It may not be used to create training material,
+ * courses, books, articles, and the like. Contact us if you are in doubt.
+ * We make no guarantees that this code is fit for any purpose.
+ * Visit http://www.pragmaticprogrammer.com/titles/brapps for more book information.
+***/
 describe('LearnJS', function() {
+  beforeEach(function() {
+    learnjs.identity = new $.Deferred();
+  });
+
   it('can show a problem view', function() {
     learnjs.showView('#problem-1');
     expect($('.view-container .problem-view').length).toEqual(1);
   });
 
-  it('shows the landing page when there is no hash', function() {
+  it('shows the landing page view when there is no hash', function() {
     learnjs.showView('');
     expect($('.view-container .landing-view').length).toEqual(1);
   });
@@ -13,6 +25,12 @@ describe('LearnJS', function() {
     spyOn(learnjs, 'problemView');
     learnjs.showView('#problem-42');
     expect(learnjs.problemView).toHaveBeenCalledWith('42');
+  });
+
+  it('triggers removingView event when removing the view', function() {
+    spyOn(learnjs, 'triggerEvent');
+    learnjs.showView('#problem-1');
+    expect(learnjs.triggerEvent).toHaveBeenCalledWith('removingView', []);
   });
 
   it('invokes the router when loaded', function() {
@@ -28,10 +46,20 @@ describe('LearnJS', function() {
     expect(learnjs.showView).toHaveBeenCalledWith(window.location.hash);
   });
 
-  it('triggers removingView event when removing the view', function() {
-    spyOn(learnjs, 'triggerEvent');
-    learnjs.showView('#problem-1');
-    expect(learnjs.triggerEvent).toHaveBeenCalledWith('removingView', []);
+  it('can flash an element while setting the text', function() {
+    var elem = $('<p>');
+    spyOn(elem, 'fadeOut').and.callThrough();
+    spyOn(elem, 'fadeIn');
+    learnjs.flashElement(elem, "new text");
+    expect(elem.text()).toEqual("new text");
+    expect(elem.fadeOut).toHaveBeenCalled();
+    expect(elem.fadeIn).toHaveBeenCalled();
+  });
+
+  it('can redirect to the main view after the last problem is answered', function() {
+    var flash = learnjs.buildCorrectFlash(2);
+    expect(flash.find('a').attr('href')).toEqual("");
+    expect(flash.find('a').text()).toEqual("You're Finished!");
   });
 
   it('can trigger events on the view', function() {
@@ -41,6 +69,88 @@ describe('LearnJS', function() {
     learnjs.triggerEvent('fooEvent', ['bar']);
     expect(callback).toHaveBeenCalled();
     expect(callback.calls.argsFor(0)[1]).toEqual('bar');
+  });
+
+  it('adds the profile link when the user logs in', function() {
+    var profile = {email: 'foo@bar.com'};
+    spyOn(learnjs, 'addProfileLink');
+    learnjs.appOnReady();
+    learnjs.identity.resolve(profile);
+    expect(learnjs.addProfileLink).toHaveBeenCalledWith(profile);
+  });
+
+  it('can append a profile view link to navbar', function() {
+    learnjs.addProfileLink({email: 'foo@bar.com'});
+    expect($('.signin-bar a').attr('href')).toEqual('#profile');
+  });
+
+  describe('saveAnswer', function() {
+    var dbspy, req, identityObj;
+    beforeEach(function() {
+      dbspy = jasmine.createSpyObj('db', ['put']);
+      dbspy.put.and.returnValue('request');
+      spyOn(AWS.DynamoDB,'DocumentClient').and.returnValue(dbspy);
+      spyOn(learnjs, 'sendDbRequest');
+      identityObj = {id: 'COGNITO_ID'};
+      learnjs.identity.resolve(identityObj);
+    });
+
+    it('writes the item to the database', function() {
+      learnjs.saveAnswer(1, {});
+      expect(learnjs.sendDbRequest).toHaveBeenCalledWith('request', jasmine.any(Function));
+      expect(dbspy.put).toHaveBeenCalledWith({
+        TableName: 'learnjs',
+        Item: {
+          userId: 'COGNITO_ID',
+          problemId: 1,
+          answer: {}
+        }
+      });
+    });
+
+    it('resubmits the request on retry', function() {
+      learnjs.saveAnswer(1, {answer: 'false'});
+      spyOn(learnjs, 'saveAnswer').and.returnValue('promise');
+      expect(learnjs.sendDbRequest.calls.first().args[1]()).toEqual('promise');
+      expect(learnjs.saveAnswer).toHaveBeenCalledWith(1, {answer: 'false'});
+    });
+  });
+
+  describe('sendDbRequest', function() {
+    var request, requestHandlers, promise, retrySpy;
+    beforeEach(function() {
+      requestHandlers = {};
+      request = jasmine.createSpyObj('request', ['send', 'on']);
+      request.on.and.callFake(function(eventName, callback) {
+        requestHandlers[eventName] = callback;
+      });
+      retrySpy = jasmine.createSpy('retry');
+      promise = learnjs.sendDbRequest(request, retrySpy);
+    });
+
+    it('resolves the returned promise on success', function(done) {
+      requestHandlers.success({data: 'data'});
+      expect(request.send).toHaveBeenCalled();
+      promise.then(function(data) {
+        expect(data).toEqual('data');
+        done();
+      }, fail);
+    });
+
+    it('rejects the returned promise on error', function(done) {
+      learnjs.identity.resolve({refresh: function() { return new $.Deferred().reject()}});
+      requestHandlers.error({code: "SomeError"});
+      promise.fail(function(resp) {
+        expect(resp).toEqual({code: "SomeError"});
+        done();
+      });
+    });
+
+    it('refreshes the credentials and retries when the credentials are expired', function() {
+      learnjs.identity.resolve({refresh: function() { return new $.Deferred().resolve()}});
+      requestHandlers.error({code: "CredentialsError"});
+      expect(retrySpy).toHaveBeenCalled();
+    });
   });
 
   describe('awsRefresh', function() {
@@ -68,12 +178,31 @@ describe('LearnJS', function() {
     });
   });
 
+  describe('profile view', function() {
+    var view;
+    beforeEach(function() {
+      view = learnjs.profileView();
+    });
+
+    it('shows the users email address when they log in', function() {
+      learnjs.identity.resolve({
+        email: 'foo@bar.com'
+      });
+      expect(view.find('.email').text()).toEqual("foo@bar.com");
+    });
+
+    it('shows no email when the user is not logged in yet', function() {
+      expect(view.find('.email').text()).toEqual("");
+    });
+  });
+
   describe('googleSignIn callback', function() {
     var user, profile;
 
     beforeEach(function() {
       profile = jasmine.createSpyObj('profile', ['getEmail']);
-      spyOn(learnjs, 'awsRefresh').and.returnValue(new $.Deferred().resolve("COGNITO_ID"));
+      var refreshPromise = new $.Deferred().resolve("COGNITO_ID").promise();
+      spyOn(learnjs, 'awsRefresh').and.returnValue(refreshPromise);
       spyOn(AWS, 'CognitoIdentityCredentials');
       user = jasmine.createSpyObj('user',
           ['getAuthResponse', 'getBasicProfile']);
@@ -103,23 +232,39 @@ describe('LearnJS', function() {
         done();
       });
     });
-  });
 
-  describe('profile view', function() {
-    var view;
-    beforeEach(function() {
-      view = learnjs.profileView();
-    });
-
-    it('shows the users email address when they log in', function() {
-      learnjs.identity.resolve({
-        email: 'foo@bar.com'
+    describe('refresh', function() {
+      var instanceSpy;
+      beforeEach(function() {
+        AWS.config.credentials = {params: {Logins: {}}};
+        var updateSpy = jasmine.createSpyObj('userUpdate', ['getAuthResponse']);
+        updateSpy.getAuthResponse.and.returnValue({id_token: "GOOGLE_ID"});
+        instanceSpy = jasmine.createSpyObj('instance', ['signIn']);
+        instanceSpy.signIn.and.returnValue(Promise.resolve(updateSpy));
+        var auth2Spy = jasmine.createSpyObj('auth2', ['getAuthInstance']);
+        auth2Spy.getAuthInstance.and.returnValue(instanceSpy);
+        window.gapi = { auth2: auth2Spy };
       });
-      expect(view.find('.email').text()).toEqual("foo@bar.com");
-    });
 
-    it('shows no email when the user is not logged in yet', function() {
-      expect(view.find('.email').text()).toEqual("");
+      it('returns a promise when token is refreshed', function(done) {
+        learnjs.identity.done(function(identity) {
+          identity.refresh().then(function() {
+            expect(AWS.config.credentials.params.Logins).toEqual({
+              'accounts.google.com': "GOOGLE_ID"
+            });
+            done();
+          });
+        });
+      });
+
+      it('does not re-prompt for consent when refreshing the token in', function(done) {
+        learnjs.identity.done(function(identity) {
+          identity.refresh().then(function() {
+            expect(instanceSpy.signIn).toHaveBeenCalledWith({prompt: 'login'});
+            done();
+          });
+        });
+      });
     });
   });
 
@@ -130,7 +275,7 @@ describe('LearnJS', function() {
     });
 
     it('has a title that includes the problem number', function() {
-      expect(view.text()).toContain('Problem #1');
+      expect(view.find('.title').text()).toEqual('Problem #1');
     });
 
     it('shows the description', function() {
@@ -172,9 +317,15 @@ describe('LearnJS', function() {
 
       describe('when the answer is correct', function() {
         beforeEach(function() {
+          spyOn(learnjs, 'saveAnswer');
           view.find('.answer').val('true');
           view.find('.check-btn').click();
         });
+
+        it('saves the result', function() {
+          expect(learnjs.saveAnswer).toHaveBeenCalledWith(1, "true");
+        });
+        // ...older tests follow
 
         it('flashes the result', function() {
           var flashArgs = learnjs.flashElement.calls.argsFor(0);

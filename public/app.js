@@ -18,6 +18,43 @@ learnjs.awsRefresh = function() {
   return deferred.promise();
 };
 
+learnjs.saveAnswer = function(problemId, answer) {
+  return learnjs.identity.then(function(identity) {
+    var db = new AWS.DynamoDB.DocumentClient();
+    var item = {
+      TableName: 'learnjs',
+      Item: {
+        userId: identity.id,
+        problemId, problemId,
+        answer, answer
+      }
+    };
+    return learnjs.sendDbRequest(db.put(item), function() {
+      return learnjs.saveAnswer(problemId, answer);
+    });
+  });
+};
+
+learnjs.sendDbRequest = function(req, retry) {
+  var promise = new $.Deferred();
+  req.on('error', function(error) {
+    if(error.code == 'CredentialsError') {
+      learnjs.identity.then(function() {
+        return retry();
+      }, function() {
+        promise.reject(resp);
+      });
+    } else {
+      promise.reject(error);
+    }
+  });
+  req.on('success', function(resp) {
+    promise.resolve(resp.data);
+  });
+  req.send();
+  return promise;
+};
+
 learnjs.problems = [
   {
     description: "What is truth?",
@@ -95,17 +132,19 @@ learnjs.problemView = function(data) {
   var title = 'Problem #' + problemNumber;
   var problemData = learnjs.problems[problemNumber - 1];
   var resultFlash = view.find('.result');
+  var answer = view.find('.answer');
 
   function checkAnswer() {
-    var answer = view.find('.answer').val();
-    var test = problemData.code.replace('__', answer) + '; problem();';
+    var _answer = answer.val();
+    var test = problemData.code.replace('__', _answer) + '; problem();';
     return eval(test);
   }
 
   function checkAnswerClick() {
-    if(checkAnswer()) {
+    if(checkAnswer(answer)) {
       var correctFlash = learnjs.buildCorrectFlash(problemNumber);
       learnjs.flashElement(resultFlash, correctFlash);
+      learnjs.saveAnswer(problemNumber, answer.val());
     } else {
       learnjs.flashElement(resultFlash, 'Incorrect!');
     }
@@ -143,17 +182,6 @@ learnjs.showView = function(hash) {
 }
 
 function googleSignIn(googleUser) {
-  function refresh() {
-    return gapi.auth2.getAuthInstance().signIn({
-      prompt: 'login'
-    }).then(function(userUpdate) {
-      var creds = AWS.config.credentials;
-      var newToken = userUpdate.getAuthResponse().id_token;
-      creds.params.Logins['accounts.google.com'] = newToken;
-      return learnjs.awsRefresh();
-    });
-  };
-
   var id_token = googleUser.getAuthResponse().id_token;
   AWS.config.update({
     region: 'us-east-1',
@@ -163,15 +191,24 @@ function googleSignIn(googleUser) {
         'accounts.google.com': id_token
       }
     })
-  });
-
+  })
+  function refresh() {
+    return gapi.auth2.getAuthInstance().signIn({
+        prompt: 'login'
+      }).then(function(userUpdate) {
+      var creds = AWS.config.credentials;
+      var newToken = userUpdate.getAuthResponse().id_token;
+      creds.params.Logins['accounts.google.com'] = newToken;
+      return learnjs.awsRefresh();
+    });
+  }
   learnjs.awsRefresh().then(function(id) {
     learnjs.identity.resolve({
       id: id,
       email: googleUser.getBasicProfile().getEmail(),
       refresh: refresh
-   });
+    });
   });
-};
+}
 
 
